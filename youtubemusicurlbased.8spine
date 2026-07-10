@@ -1,0 +1,797 @@
+/* @8spine-meta
+ * type: MODULE
+ * category: modules
+ * featured: false
+ * trusted: false
+ * nsfw: false
+ */
+
+const LOG_PREFIX = '[YTDirectURL]';
+
+const YT_BASE = 'https://www.youtube.com';
+const YTM_BASE = 'https://music.youtube.com';
+
+const YT_API_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
+
+const MEDIA_CACHE_TTL_MS = 45 * 60 * 1000;
+const VISITOR_DATA_TTL_MS = 20 * 60 * 1000;
+
+let cachedVisitorData = null;
+let cachedVisitorDataAt = 0;
+
+const mediaCache = {};
+const mediaInflight = {};
+
+const IOS_CONTEXT = {
+    clientName: 'IOS',
+    clientVersion: '20.22.1',
+    deviceMake: 'Apple',
+    deviceModel: 'iPhone16,2',
+    osName: 'iPhone',
+    osVersion: '18.5.0.22F76',
+    hl: 'en',
+    gl: 'US',
+};
+
+const ANDROID_CONTEXT = {
+    clientName: 'ANDROID',
+    clientVersion: '20.22.36',
+    androidSdkVersion: 35,
+    osName: 'Android',
+    osVersion: '15',
+    hl: 'en',
+    gl: 'US',
+};
+
+const IOS_USER_AGENT =
+    'com.google.ios.youtube/20.22.1 (iPhone16,2; U; CPU iOS 18_5 like Mac OS X)';
+
+const ANDROID_USER_AGENT =
+    'com.google.android.youtube/20.22.36 (Linux; U; Android 15)';
+
+
+const QUALITY = {
+    LOW: 'LOW',
+    HIGH: 'HIGH',
+    BEST: 'BEST',
+};
+
+const QUALITY_OPTIONS = [
+    {
+        label: 'Low',
+        value: QUALITY.LOW
+    },
+    {
+        label: 'High',
+        value: QUALITY.HIGH
+    },
+    {
+        label: 'Best Available',
+        value: QUALITY.BEST
+    },
+];
+
+
+// -------------------------
+// URL HANDLING
+// -------------------------
+
+function extractVideoId(input) {
+    if (!input) return '';
+
+    input = input.trim();
+
+    try {
+        const url = new URL(input);
+
+        if (
+            url.hostname.includes('youtube.com') ||
+            url.hostname.includes('music.youtube.com')
+        ) {
+            return url.searchParams.get('v') || '';
+        }
+
+        if (url.hostname === 'youtu.be') {
+            return url.pathname.slice(1);
+        }
+
+    } catch {}
+
+    // fallback if someone pastes only an ID
+    if (/^[a-zA-Z0-9_-]{11}$/.test(input)) {
+        return input;
+    }
+
+    return '';
+}
+
+
+// -------------------------
+// CACHE
+// -------------------------
+
+function cacheKey(type, id, quality) {
+    return `${type}:${id}:${quality}`;
+}
+
+function getCache(key) {
+    const item = mediaCache[key];
+
+    if (!item) return null;
+
+    if (item.expire > Date.now()) {
+        return item.data;
+    }
+
+    delete mediaCache[key];
+
+    return null;
+}
+
+
+function setCache(key, data) {
+    mediaCache[key] = {
+        data,
+        expire: Date.now() + MEDIA_CACHE_TTL_MS
+    };
+}
+
+
+async function cachedResolve(key, resolver) {
+
+    const cached = getCache(key);
+
+    if (cached) return cached;
+
+    if (mediaInflight[key]) {
+        return mediaInflight[key];
+    }
+
+    mediaInflight[key] = resolver()
+        .then(result => {
+
+            setCache(key, result);
+
+            return result;
+
+        })
+        .finally(() => {
+
+            delete mediaInflight[key];
+
+        });
+
+
+    return mediaInflight[key];
+}
+
+
+
+// -------------------------
+// VISITOR DATA
+// -------------------------
+
+async function getVisitorData() {
+
+    if (
+        cachedVisitorData &&
+        Date.now() - cachedVisitorDataAt < VISITOR_DATA_TTL_MS
+    ) {
+        return cachedVisitorData;
+    }
+
+
+    try {
+
+        const res = await fetch(
+            `${YTM_BASE}/youtubei/v1/visitor_id?key=${YT_API_KEY}`,
+            {
+                method:'POST',
+                headers:{
+                    'Content-Type':'application/json'
+                },
+                body:JSON.stringify({
+                    context:{
+                        client:{
+                            clientName:'WEB_REMIX',
+                            clientVersion:'1.20260304.03.00'
+                        }
+                    }
+                })
+            }
+        );
+
+
+        const json = await res.json();
+
+
+        if(json?.responseContext?.visitorData){
+
+            cachedVisitorData =
+                json.responseContext.visitorData;
+
+            cachedVisitorDataAt =
+                Date.now();
+        }
+
+
+    } catch(e){
+
+        console.log(
+            LOG_PREFIX,
+            'visitor failed',
+            e.message
+        );
+
+    }
+
+
+    return cachedVisitorData;
+}
+
+
+
+// -------------------------
+// PLAYER API
+// -------------------------
+
+async function fetchPlayer(videoId, client, agent){
+
+    const visitor =
+        await getVisitorData();
+
+
+    const ctx = {
+        ...client
+    };
+
+
+    if(visitor){
+        ctx.visitorData = visitor;
+    }
+
+
+    const response =
+        await fetch(
+            `${YT_BASE}/youtubei/v1/player?prettyPrint=false&key=${YT_API_KEY}`,
+            {
+                method:'POST',
+
+                headers:{
+                    'Content-Type':'application/json',
+                    'User-Agent':agent
+                },
+
+                body:JSON.stringify({
+
+                    context:{
+                        client:ctx
+                    },
+
+                    videoId,
+
+                    contentCheckOk:true,
+                    racyCheckOk:true
+                })
+            }
+        );
+
+
+    if(!response.ok){
+
+        throw new Error(
+            'Player HTTP ' + response.status
+        );
+
+    }
+
+
+    const data =
+        await response.json();
+
+
+    if(
+        data?.playabilityStatus?.status !== 'OK'
+    ){
+
+        throw new Error(
+            data?.playabilityStatus?.reason ||
+            'Playback blocked'
+        );
+
+    }
+
+
+    return data;
+
+}// -------------------------
+// METADATA
+// -------------------------
+
+function getText(runs) {
+    if (!runs) return '';
+
+    return runs
+        .map(x => x.text || '')
+        .join('');
+}
+
+
+async function getVideoMetadata(videoId) {
+
+    const data =
+        await fetchPlayer(
+            videoId,
+            IOS_CONTEXT,
+            IOS_USER_AGENT
+        );
+
+
+    const details =
+        data.videoDetails || {};
+
+
+    return {
+
+        id: videoId,
+
+        title:
+            details.title ||
+            'Unknown Title',
+
+        artist:
+            details.author ||
+            'Unknown Artist',
+
+        album:
+            '',
+
+        duration:
+            Number(details.lengthSeconds || 0),
+
+        albumCover:
+            details.thumbnail?.thumbnails?.at(-1)?.url ||
+            '',
+
+    };
+}
+
+
+
+// -------------------------
+// FORMAT PICKING
+// -------------------------
+
+function pickAudioFormat(streamingData, quality){
+
+    let formats =
+        streamingData.adaptiveFormats || [];
+
+
+    formats =
+        formats.filter(
+            f =>
+                f.url &&
+                f.mimeType &&
+                f.mimeType.startsWith('audio/')
+        );
+
+
+    if(!formats.length)
+        return null;
+
+
+    formats.sort(
+        (a,b)=>
+            (a.bitrate || 0)
+            -
+            (b.bitrate || 0)
+    );
+
+
+    if(quality === QUALITY.LOW){
+
+        return formats[0];
+
+    }
+
+
+    return formats[formats.length - 1];
+
+}
+
+
+
+function pickProgressive(streamingData){
+
+    const formats =
+        streamingData.formats || [];
+
+
+    return formats.find(
+        f =>
+            f.url &&
+            f.mimeType &&
+            f.mimeType.includes('mp4')
+    );
+
+}
+
+
+
+// -------------------------
+// MEDIA RESOLUTION
+// -------------------------
+
+async function resolveDirectMedia(
+    videoId,
+    quality
+){
+
+    let player;
+
+
+    try {
+
+        player =
+            await fetchPlayer(
+                videoId,
+                IOS_CONTEXT,
+                IOS_USER_AGENT
+            );
+
+
+    } catch(e){
+
+
+        console.log(
+            LOG_PREFIX,
+            'IOS failed, Android fallback'
+        );
+
+
+        player =
+            await fetchPlayer(
+                videoId,
+                ANDROID_CONTEXT,
+                ANDROID_USER_AGENT
+            );
+
+    }
+
+
+    const streaming =
+        player.streamingData || {};
+
+
+
+    // Prefer audio
+    const audio =
+        pickAudioFormat(
+            streaming,
+            quality
+        );
+
+
+    if(audio?.url){
+
+        return {
+
+            url:
+                audio.url,
+
+            mimeType:
+                audio.mimeType,
+
+            bitrate:
+                audio.bitrate || 0,
+
+            hls:false
+        };
+
+    }
+
+
+
+    // fallback mp4
+
+    const progressive =
+        pickProgressive(
+            streaming
+        );
+
+
+    if(progressive?.url){
+
+        return {
+
+            url:
+                progressive.url,
+
+            mimeType:
+                progressive.mimeType,
+
+            bitrate:
+                progressive.bitrate || 0,
+
+            hls:false
+
+        };
+
+    }
+
+
+
+    if(streaming.hlsManifestUrl){
+
+        return {
+
+            url:
+                streaming.hlsManifestUrl,
+
+            mimeType:
+                'application/vnd.apple.mpegurl',
+
+            bitrate:0,
+
+            hls:true
+
+        };
+
+    }
+
+
+    throw new Error(
+        LOG_PREFIX +
+        ' no playable media'
+    );
+
+}
+
+
+
+function resolveCachedMedia(
+    videoId,
+    quality
+){
+
+    return cachedResolve(
+        cacheKey(
+            'media',
+            videoId,
+            quality
+        ),
+
+        () =>
+            resolveDirectMedia(
+                videoId,
+                quality
+            )
+    );
+
+}
+
+
+
+// -------------------------
+// 8SPINE SEARCH BAR HANDLER
+// -------------------------
+
+async function resolveURL(input){
+
+    const videoId =
+        extractVideoId(input);
+
+
+    if(!videoId){
+
+        throw new Error(
+            LOG_PREFIX +
+            ' Invalid YouTube URL'
+        );
+
+    }
+
+
+    const track =
+        await getVideoMetadata(
+            videoId
+        );
+
+
+    return {
+        tracks:[
+            track
+        ],
+
+        total:1
+    };
+
+}// -------------------------
+// 8SPINE STREAM HANDLERS
+// -------------------------
+
+async function getTrackStreamUrl(
+    trackId,
+    preferredQuality,
+    context
+){
+
+    const quality =
+        context?.settings?.quality?.value ||
+        preferredQuality ||
+        QUALITY.HIGH;
+
+
+    const media =
+        await resolveCachedMedia(
+            trackId,
+            quality
+        );
+
+
+    return {
+
+        streamUrl:
+            media.url,
+
+        streamType:
+            media.hls
+                ? 'hls'
+                : 'direct',
+
+        mimeType:
+            media.mimeType,
+
+
+        track:{
+
+            id:
+                trackId,
+
+            audioQuality:
+                quality,
+
+            bitrate:
+                media.bitrate
+
+        }
+
+    };
+
+}
+
+
+
+async function getTrackDownloadUrl(
+    trackId,
+    preferredQuality,
+    context
+){
+
+    const quality =
+        context?.settings?.quality?.value ||
+        preferredQuality ||
+        QUALITY.HIGH;
+
+
+
+    const media =
+        await resolveCachedMedia(
+            trackId,
+            quality
+        );
+
+
+    return {
+
+        downloadUrl:
+            media.url,
+
+        streamUrl:
+            media.url,
+
+        mimeType:
+            media.mimeType,
+
+
+        fileName:
+            `${trackId}.${media.hls ? 'm3u8' : 'mp4'}`,
+
+
+        track:{
+
+            id:
+                trackId,
+
+            audioQuality:
+                quality,
+
+            bitrate:
+                media.bitrate
+
+        }
+
+    };
+
+}
+
+
+
+// -------------------------
+// MODULE
+// -------------------------
+
+return {
+
+    id:
+        'youtube-direct-url',
+
+
+    name:
+        'YouTube Direct URL',
+
+
+    author:
+        'nvmindl',
+
+
+    version:
+        '1.0',
+
+
+    labels:[
+        'YouTube',
+        'Direct',
+        'URL',
+        'Audio'
+    ],
+
+
+    description:
+        'Paste a YouTube URL and stream directly without searching.',
+
+
+
+    noStreamCache:
+        true,
+
+
+
+    settings:{
+
+        quality:{
+
+            type:
+                'selector',
+
+            label:
+                'Audio Quality',
+
+            description:
+                'Preferred direct audio format.',
+
+
+            options:
+                QUALITY_OPTIONS,
+
+
+            defaultValue:
+                QUALITY.HIGH
+
+        }
+
+    },
+
+
+    // search bar input
+    searchTracks:
+        resolveURL,
+
+
+    getTrackStreamUrl,
+
+
+    getTrackDownloadUrl
+
+};
