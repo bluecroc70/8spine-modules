@@ -1,0 +1,32 @@
+{
+  "id": "youtube_url_based",
+  "name": "YouTube URL-Based",
+  "pkg": "com.8spine.module.youtube_url_based",
+  "file": "youtubemusicurlbased.8spine",
+  "download": "https://raw.githubusercontent.com/bluecroc70/8spine-modules/main/youtubemusicurlbased.8spine",
+  "version": "v1.0.0",
+  "code": 200,
+  "type": "MODULE",
+  "author": "bluecroc70",
+  "description": "Paste YouTube URLs directly and stream using YouTube direct playback.",
+  "tags": [
+    "YOUTUBE",
+    "DIRECT",
+    "URL",
+    "AUDIO"
+  ],
+  "featured": false,
+  "trusted": false,
+  "nsfw": false,
+  "size": 12288,
+  "lang": "all",
+  "folder": "modules",
+  "sources": [
+    {
+      "name": "YouTube URL-Based",
+      "lang": "all",
+      "id": "youtube_url_based",
+      "baseUrl": "https://raw.githubusercontent.com/bluecroc70/8spine-modules/main/"
+    }
+  ]
+}
